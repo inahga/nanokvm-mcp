@@ -1,93 +1,60 @@
-# NanoKVM MCP Server
+# nanokvm-mcp
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+An [MCP](https://modelcontextprotocol.io/) server, written in Rust, that exposes
+a [Sipeed NanoKVM](https://github.com/sipeed/NanoKVM) device as a set of tools
+an AI assistant (Claude, etc.) can drive: keyboard, mouse, screenshots, ISO
+storage, power, and basic device info.
 
-An MCP (Model Context Protocol) server for controlling [Sipeed NanoKVM](https://github.com/sipeed/NanoKVM) devices. This enables AI assistants like Claude to remotely control hardware via keyboard, mouse, power buttons, and screen capture.
+## Status
 
-## What is NanoKVM?
+- Tested against NanoKVM PCIe with firmware **2.3.6** (app), **v1.4.2** (image).
+- Firmware ≥ 2.3.0 only. The WebSocket HID protocol changed substantially
+  between 2.2.x and 2.3.x; this port speaks the newer binary format (HID-report
+  frames) and does **not** attempt the older JSON-text format.
+- Auth handles both Set-Cookie and JSON-body token responses. On 2.3.6 the
+  device only returns the JWT in the body; the cookie fallback path is what
+  actually carries the session.
 
-[NanoKVM](https://github.com/sipeed/NanoKVM) is an open-source, affordable IP-KVM device based on RISC-V. It allows remote access to computers at the BIOS level—perfect for managing servers, embedded systems, or any headless machine.
-
-## What is MCP?
-
-[Model Context Protocol](https://modelcontextprotocol.io/) is an open standard for connecting AI assistants to external tools and data sources. This server exposes NanoKVM functionality as MCP tools that Claude and other AI assistants can use.
-
-## Features
-
-| Category | Capabilities |
-|----------|-------------|
-| **Power Control** | Power on/off, reset, force shutdown via ATX header |
-| **Keyboard** | Type text, send key combinations (Ctrl+C, Alt+F4, etc.) |
-| **Mouse/Touch** | Click, move, scroll, tap at absolute screen coordinates |
-| **Screenshots** | Capture display as JPEG from MJPEG video stream |
-| **ISO Mounting** | Mount/unmount ISO images for remote OS installation |
-| **Monitoring** | Power LED status, HDD activity, HDMI state, resolution |
-
-## Installation
-
-### From Source
+## Build
 
 ```bash
-git clone https://github.com/scgreenhalgh/nanokvm-mcp.git
+git clone https://github.com/inahga/nanokvm-mcp.git
 cd nanokvm-mcp
-pip install -e .
+cargo install --path .
 ```
 
-### Dependencies
+This puts `nanokvm-mcp` in `~/.cargo/bin/`. Requires Rust 1.85+ (edition 2024).
 
-- Python 3.10+
-- `mcp` - Model Context Protocol SDK
-- `httpx` - Async HTTP client
-- `websockets` - WebSocket client for real-time HID
-- `pycryptodome` - AES encryption for authentication
-- `pillow` - Image processing for screenshots
+For a non-installed build use `cargo build --release` and find the binary in
+`target/release/nanokvm-mcp`.
 
 ## Configuration
 
-### Environment Variables
+Every flag is also readable from an env var. Env vars are what the MCP-host
+JSON config sets; the CLI flags are mostly for ad-hoc testing.
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `NANOKVM_HOST` | **Yes** | - | NanoKVM IP address or hostname |
-| `NANOKVM_USER` | No | `admin` | Web UI username |
-| `NANOKVM_PASS` | No | `admin` | Web UI password |
-| `NANOKVM_SCREEN_WIDTH` | No | `1920` | Target screen width in pixels |
-| `NANOKVM_SCREEN_HEIGHT` | No | `1080` | Target screen height in pixels |
-| `NANOKVM_HTTPS` | No | `false` | Use HTTPS instead of HTTP |
+| Flag              | Env var                 | Default | Description                                              |
+|-------------------|-------------------------|---------|----------------------------------------------------------|
+| `--host`          | `NANOKVM_HOST`          | (req'd) | NanoKVM IP or hostname                                   |
+| `--user`          | `NANOKVM_USER`          | `admin` | Web UI username                                          |
+| `--pass`          | `NANOKVM_PASS`          | `admin` | Web UI password                                          |
+| `--screen-width`  | `NANOKVM_SCREEN_WIDTH`  | `1920`  | Screen width in pixels (for absolute mouse mapping)      |
+| `--screen-height` | `NANOKVM_SCREEN_HEIGHT` | `1080`  | Screen height in pixels                                  |
+| `--https`         | `NANOKVM_HTTPS`         | `false` | Use HTTPS/WSS instead of HTTP/WS                         |
+| `--verify-ssl`    | `NANOKVM_VERIFY_SSL`    | `true`  | Verify TLS certificates; set `false` for self-signed     |
+| `--iso-dir`       | `NANOKVM_ISO_DIR`       | (unset) | Allowlisted directory for ISO uploads. Unset disables `nanokvm_upload_iso`. |
 
-### Claude Desktop
+## Claude Desktop / Claude Code config
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
-
-```json
-{
-  "mcpServers": {
-    "nanokvm": {
-      "command": "python",
-      "args": ["-m", "nanokvm_mcp.server"],
-      "env": {
-        "NANOKVM_HOST": "192.168.1.100",
-        "NANOKVM_USER": "admin",
-        "NANOKVM_PASS": "admin",
-        "NANOKVM_SCREEN_WIDTH": "1920",
-        "NANOKVM_SCREEN_HEIGHT": "1080"
-      }
-    }
-  }
-}
-```
-
-### Claude Code
-
-Add to your Claude Code MCP configuration:
+Drop this into `~/Library/Application Support/Claude/claude_desktop_config.json`
+(macOS) / `%APPDATA%\Claude\claude_desktop_config.json` (Windows), or your
+Claude Code MCP config:
 
 ```json
 {
   "mcpServers": {
     "nanokvm": {
-      "command": "python",
-      "args": ["-m", "nanokvm_mcp.server"],
+      "command": "nanokvm-mcp",
       "env": {
         "NANOKVM_HOST": "192.168.1.100"
       }
@@ -96,246 +63,133 @@ Add to your Claude Code MCP configuration:
 }
 ```
 
-## Available MCP Tools
+If `nanokvm-mcp` isn't on the host's `$PATH`, use the full path returned by
+`cargo install`.
 
-### Power Control
+## Tools
 
-| Tool | Parameters | Description |
-|------|------------|-------------|
-| `nanokvm_power` | `action`: `power`, `power_long`, `reset` | Control power button or reset |
-| `nanokvm_led_status` | - | Get power and HDD LED states |
+The server registers ~28 tools. They're grouped here for navigability; the
+real description for each (and the JSON schema the model sees) lives in
+`src/server.rs`.
 
-**Actions:**
-- `power` - Short press (800ms) - normal power on/off
-- `power_long` - Long press (5000ms) - force power off
-- `reset` - Press reset button
+### Power
 
-### Display
+| Tool                  | What it does                                                   |
+|-----------------------|----------------------------------------------------------------|
+| `nanokvm_power`       | Short press / long-hold / reset via the ATX header             |
+| `nanokvm_power_cycle` | Force-off, wait, power on — for boards without a reset line    |
+| `nanokvm_led_status`  | Read `{pwr, hdd}` LED states                                   |
 
-| Tool | Parameters | Description |
-|------|------------|-------------|
-| `nanokvm_hdmi_status` | - | Get HDMI connection state and resolution |
-| `nanokvm_hdmi_reset` | - | Reset HDMI connection |
-| `nanokvm_screenshot` | - | Capture display as base64 JPEG |
+### Display / capture
 
-### Keyboard Input
+| Tool                  | What it does                                                   |
+|-----------------------|----------------------------------------------------------------|
+| `nanokvm_screenshot`  | Capture a JPEG frame from the MJPEG stream                     |
+| `nanokvm_hdmi_status` | HDMI enabled flag                                              |
+| `nanokvm_hdmi_reset`  | Reset HDMI capture                                             |
+| `nanokvm_hdmi_enable` | Enable HDMI capture                                            |
+| `nanokvm_hdmi_disable`| Disable HDMI capture (screenshots will time out until enabled) |
 
-| Tool | Parameters | Description |
-|------|------------|-------------|
-| `nanokvm_send_text` | `text`, `language` | Type text (max 1024 chars) |
-| `nanokvm_send_key` | `key`, `ctrl`, `shift`, `alt`, `meta` | Send single key with modifiers |
+### Keyboard
 
-**Supported Keys:**
-- Letters: `a`-`z`
-- Numbers: `0`-`9`
-- Function keys: `f1`-`f12`
-- Navigation: `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`
-- Control: `enter`, `escape`, `tab`, `backspace`, `delete`, `insert`, `space`
+| Tool                | What it does                                                   |
+|---------------------|----------------------------------------------------------------|
+| `nanokvm_send_text` | Paste text via REST (≤1024 chars) — fast bulk input            |
+| `nanokvm_type_text` | Type text char-by-char via WebSocket — slower, no length limit |
+| `nanokvm_send_key`  | One key (with optional `ctrl`/`shift`/`alt`/`meta`)            |
 
-### Mouse/Touch Input
+### Mouse — pick the right family for the target
 
-| Tool | Parameters | Description |
-|------|------------|-------------|
-| `nanokvm_tap` | `x`, `y` | Tap at screen coordinates |
-| `nanokvm_click` | `button`, `x`, `y` | Click button, optionally at position |
-| `nanokvm_move` | `x`, `y` | Move cursor to position |
-| `nanokvm_scroll` | `amount` | Scroll wheel (positive=down) |
+In an **OS** (Linux/Windows/macOS desktop, login manager, X/Wayland), use the
+absolute tools. They take screen coordinates and teleport the cursor:
 
-**Coordinate System:**
-- Origin (0, 0) is top-left corner
-- Coordinates are in screen pixels based on `SCREEN_WIDTH` and `SCREEN_HEIGHT`
-- Internally mapped to NanoKVM's 1-32767 absolute coordinate range
+| Tool             | What it does                                |
+|------------------|---------------------------------------------|
+| `nanokvm_move`   | Move cursor to `(x, y)`                     |
+| `nanokvm_click`  | Click button, optionally at `(x, y)` first  |
+| `nanokvm_tap`    | Left-click at `(x, y)` (touchscreen analog) |
+| `nanokvm_scroll` | Scroll the wheel                            |
+
+In **pre-OS** (BIOS / UEFI setup, GRUB, install media before the kernel inits
+HID), use the relative tools. BIOS firmware only implements the USB HID boot
+mouse and ignores the absolute touchpad descriptor — absolute calls there will
+appear to do small random moves rather than jump to the target:
+
+| Tool                      | What it does                                |
+|---------------------------|---------------------------------------------|
+| `nanokvm_move_relative`   | Move cursor by signed `(dx, dy)`            |
+| `nanokvm_click_relative`  | Click button at current position            |
+
+### HID management
+
+| Tool                | What it does                                  |
+|---------------------|-----------------------------------------------|
+| `nanokvm_reset_hid` | Reset the keyboard/mouse USB gadget           |
+| `nanokvm_hid_mode`  | Read current HID mode (`normal` / `hid-only`) |
 
 ### Storage
 
-| Tool | Parameters | Description |
-|------|------------|-------------|
-| `nanokvm_list_images` | - | List available ISO images |
-| `nanokvm_mount_iso` | `file`, `as_cdrom` | Mount ISO image |
-| `nanokvm_unmount_iso` | - | Unmount current ISO |
-| `nanokvm_mounted_image` | - | Get mounted image info |
+| Tool                         | What it does                                              |
+|------------------------------|-----------------------------------------------------------|
+| `nanokvm_list_images`        | List ISOs in `/data` on the NanoKVM                       |
+| `nanokvm_mounted_image`      | Currently mounted image                                   |
+| `nanokvm_mount_iso`          | Mount an ISO as CD-ROM or USB disk                        |
+| `nanokvm_unmount_iso`        | Unmount the mounted image                                 |
+| `nanokvm_cdrom`              | Read the CD-ROM exposure flag                             |
+| `nanokvm_delete_iso`         | Delete an ISO from `/data` (firmware ≥ 2.3.0)             |
+| `nanokvm_iso_upload_enabled` | Is `/data` writable?                                      |
+| `nanokvm_upload_iso`         | Multipart-upload a local ISO file (path must be inside `--iso-dir`) |
 
-### System
+### Info
 
-| Tool | Parameters | Description |
-|------|------------|-------------|
-| `nanokvm_reset_hid` | - | Reset keyboard/mouse devices |
-| `nanokvm_info` | - | Get NanoKVM device info |
-| `nanokvm_hardware` | - | Get hardware information |
+| Tool                | What it does                                  |
+|---------------------|-----------------------------------------------|
+| `nanokvm_info`      | IP, firmware, image, mdns name, device key    |
+| `nanokvm_hardware`  | Hardware variant (e.g. `PCIE`)                |
 
-## Usage Examples
+## Operational notes
 
-Once configured, ask Claude to:
+A few things the MCP `instructions` string also tells the model at session
+start:
 
-| Request | Tool Used |
-|---------|-----------|
-| "Is the server powered on?" | `nanokvm_led_status` |
-| "Power on the machine" | `nanokvm_power` |
-| "Reset the server" | `nanokvm_power` with `action="reset"` |
-| "Force shutdown" | `nanokvm_power` with `action="power_long"` |
-| "Type 'root' and press enter" | `nanokvm_send_text` + `nanokvm_send_key` |
-| "Press Ctrl+Alt+Delete" | `nanokvm_send_key` with modifiers |
-| "Take a screenshot" | `nanokvm_screenshot` |
-| "Click at position 500, 300" | `nanokvm_click` |
-| "Mount the Ubuntu ISO" | `nanokvm_mount_iso` |
+- **Cleanup.** If you mount an ISO, unmount it before ending. If you upload or
+  fetch an ISO that won't be reused, delete it. `/data` is shared.
+- **Power tools physically affect the host.** Confirm intent before calling
+  `nanokvm_power` or `nanokvm_power_cycle`.
+- **Two devices.** The NanoKVM is the controlling KVM; the target (the host
+  it's plugged into) is a separate machine. They're not always in the same
+  state.
 
-## Programmatic Usage
-
-You can also use the client library directly:
-
-```python
-import asyncio
-from nanokvm_mcp import NanoKVMClient
-
-async def main():
-    # Initialize client
-    client = NanoKVMClient(
-        host="192.168.1.100",
-        username="admin",
-        password="admin",
-        screen_width=1920,
-        screen_height=1080,
-    )
-
-    try:
-        # Check power status
-        status = await client.get_led_status()
-        print(f"Power LED: {status['pwr']}, HDD LED: {status['hdd']}")
-
-        # Get HDMI info
-        hdmi = await client.get_hdmi_status()
-        print(f"Resolution: {hdmi['width']}x{hdmi['height']}")
-
-        # Type some text
-        await client.paste_text("Hello, World!")
-
-        # Send Enter key
-        await client.send_key("enter")
-
-        # Take a screenshot
-        screenshot = await client.screenshot()
-        with open("screenshot.jpg", "wb") as f:
-            f.write(screenshot)
-
-        # Click at coordinates
-        await client.tap(500, 300)
-
-        # Power cycle
-        await client.reset()
-
-    finally:
-        await client.close()
-
-asyncio.run(main())
-```
-
-## API Reference
-
-See [API_REFERENCE.md](API_REFERENCE.md) for complete documentation of the NanoKVM REST API and WebSocket protocol, including:
-
-- Authentication (AES-256-CBC encryption)
-- All REST endpoints with request/response formats
-- WebSocket HID protocol for keyboard and mouse
-- USB HID keycodes reference
-- Direct SSH HID access via `/dev/hidg*`
-
-## How It Works
-
-### Architecture
-
-```
-┌─────────────────┐     HTTP/WS      ┌─────────────────┐
-│   MCP Client    │◄────────────────►│    NanoKVM      │
-│  (Claude, etc.) │                  │                 │
-└────────┬────────┘                  │  ┌───────────┐  │
-         │                           │  │ REST API  │  │
-    MCP Protocol                     │  └───────────┘  │
-         │                           │  ┌───────────┐  │
-┌────────▼────────┐                  │  │ WebSocket │  │
-│  nanokvm-mcp    │                  │  │   /api/ws │  │
-│     Server      │                  │  └───────────┘  │
-│                 │                  │  ┌───────────┐  │
-│ • Power control │                  │  │   MJPEG   │  │
-│ • HID input     │                  │  │  Stream   │  │
-│ • Screenshots   │                  │  └───────────┘  │
-└─────────────────┘                  └─────────────────┘
-```
-
-### Communication Methods
-
-| Feature | Method | Endpoint |
-|---------|--------|----------|
-| Authentication | REST | `POST /api/auth/login` |
-| Power control | REST | `POST /api/vm/gpio` |
-| Text input | REST | `POST /api/hid/paste` |
-| Key/Mouse events | WebSocket | `/api/ws` |
-| Screenshots | REST | `GET /api/stream/mjpeg` (parsed) |
-| ISO mounting | REST | `POST /api/storage/image/mount` |
-
-## Development
-
-### Setup
-
-```bash
-# Clone repository
-git clone https://github.com/scgreenhalgh/nanokvm-mcp.git
-cd nanokvm-mcp
-
-# Install with dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-```
-
-### Project Structure
+## Project layout
 
 ```
 nanokvm-mcp/
-├── nanokvm_mcp/
-│   ├── __init__.py      # Package exports
-│   ├── server.py        # FastMCP server with tool definitions
-│   ├── client.py        # NanoKVM API client (REST + WebSocket)
-│   ├── auth.py          # AES password encryption
-│   └── hid.py           # USB HID keycodes and helpers
-├── pyproject.toml       # Package configuration
-├── README.md            # This file
-└── API_REFERENCE.md     # Complete API documentation
+├── Cargo.toml
+├── README.md
+└── src/
+    ├── main.rs       — env / CLI parsing, stdio MCP service
+    ├── auth.rs       — CryptoJS-compatible AES-256-CBC login (EVP_BytesToKey)
+    ├── hid.rs        — HID scancodes, modifier bits, key lookups
+    ├── client.rs     — async client: REST + WebSocket + MJPEG screenshot
+    ├── server.rs     — rmcp tool surface
+    ├── ws.rs         — WebSocket connect helper
+    └── error.rs      — typed error enum
 ```
 
 ## Troubleshooting
 
-### Connection Refused
-
-1. Verify NanoKVM is reachable: `ping <NANOKVM_HOST>`
-2. Check web UI is accessible: `http://<NANOKVM_HOST>`
-3. Verify credentials are correct
-
-### Authentication Failed
-
-1. Default credentials are `admin`/`admin`
-2. Check if password was changed in NanoKVM web UI
-3. Authentication can be disabled in `/etc/kvm/server.yaml`
-
-### HID Input Not Working
-
-1. Try `nanokvm_reset_hid` tool
-2. Check "Reset HID" in NanoKVM web UI
-3. Verify USB cable connection to target machine
-4. Check `/dev/hidg*` devices exist on NanoKVM via SSH
-
-### Screenshot Timeout
-
-1. Ensure HDMI is connected and signal detected
-2. Check `nanokvm_hdmi_status` for connection state
-3. Try `nanokvm_hdmi_reset` to reinitialize
+- **`ERROR: nanokvm api returned code -2: mount image failed`** — the host
+  still holds `/dev/sr0` open. SSH in and `sudo umount /mnt`, then retry.
+- **Cursor wanders instead of teleporting** — you're in a pre-OS environment.
+  Switch to `nanokvm_move_relative` / `nanokvm_click_relative`.
+- **Screenshots are stale / identical hashes** — the MJPEG `?n=1` endpoint
+  returns the cached frame until the source pushes a new one. Static screens
+  hold the cache. `nanokvm_hdmi_reset` flushes it (slow, ~2 s).
+- **`mount image failed` on a crafted minimal ISO** — the kernel's mass-storage
+  gadget rejects backing files that aren't real ISO 9660. Use a real ISO.
+- **`delete image` returns 404** — your firmware is < 2.3.0. Upgrade, or
+  delete via SSH (`rm /data/<name>.iso`).
 
 ## License
 
-MIT
-
-## Related Projects
-
-- [Sipeed NanoKVM](https://github.com/sipeed/NanoKVM) - The hardware this server controls
-- [Model Context Protocol](https://modelcontextprotocol.io/) - The protocol specification
-- [FastMCP](https://gofastmcp.com/) - Python MCP framework
+MIT — see the original upstream project for history.

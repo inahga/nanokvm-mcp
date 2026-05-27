@@ -1,0 +1,50 @@
+[package]
+name = "nanokvm-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "MCP server for controlling Sipeed NanoKVM devices"
+license = "MIT"
+
+[[bin]]
+name = "nanokvm-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# MCP
+rmcp = { version = "1.7", features = ["server", "macros", "transport-io", "schemars"] }
+
+# Async runtime
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-std", "signal"] }
+
+# HTTP + WebSocket
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "cookies", "multipart"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+http = "1"
+
+# Crypto (CryptoJS-compatible password encryption)
+aes = "0.9"
+cbc = { version = "0.2", features = ["alloc"] }
+md-5 = "0.11"
+base64 = "0.22"
+percent-encoding = "2"
+rand = "0.10"
+
+# Serde / JSON. `schemars` is re-exported from rmcp — don't pull it directly,
+# or we end up with two versions in the tree (0.8 + 1.x).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Image
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
+# CLI + logging + errors
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+futures-util = "0.3"
+
+[dev-dependencies]
+hex = "0.4"

@@ -1,31 +1,6 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual environments
-.env
-.venv
-env/
-venv/
-ENV/
+# Rust
+target/
+Cargo.lock.bak
 
 # IDE
 .idea/
@@ -33,19 +8,6 @@ ENV/
 *.swp
 *.swo
 *~
-
-# Testing
-.tox/
-.nox/
-.coverage
-.coverage.*
-htmlcov/
-.pytest_cache/
-.mypy_cache/
-
-# Distribution
-*.manifest
-*.spec
 
 # OS
 .DS_Store
@@ -55,6 +17,7 @@ Thumbs.db
 *.log
 
 # Credentials (never commit)
+.env
 .env.local
 .env.development
 credentials*.json

@@ -31,6 +31,10 @@ pub struct Config {
     /// entirely. Any requested file must canonicalize to a path inside this
     /// directory (after `..` and symlink resolution).
     pub iso_dir: Option<std::path::PathBuf>,
+    /// TTY device on the NanoKVM whose TX line is wired to an external
+    /// power-relay trigger. `Some("/dev/ttyS2")` enables
+    /// `external_power_reset`; `None` keeps the tool inert.
+    pub uart_reset_device: Option<String>,
 }
 
 pub struct NanoKvmClient {
@@ -216,6 +220,90 @@ impl NanoKvmClient {
         // `/api/vm/gpio` is overloaded: GET returns `{pwr, hdd}` LED states;
         // POST presses a virtual button.
         self.request(Method::GET, "/api/vm/gpio", None).await
+    }
+
+    /// Drive the NanoKVM's UART TX line low for `duration_ms` via a UART
+    /// break, then release. For setups where the TX line drives an external
+    /// power relay (instead of the ATX header) and the host is wired into
+    /// that relay's NO outlet, this performs a hard power cycle.
+    ///
+    /// Runs over the device's web-terminal WebSocket, using the same JWT auth
+    /// as the rest of the API. Requires `config.uart_reset_device` to be set
+    /// — otherwise returns [`Error::InvalidArgument`].
+    pub async fn external_power_reset(&self, duration_ms: u64) -> Result<()> {
+        use futures_util::{SinkExt, StreamExt};
+
+        let device = self.config.uart_reset_device.as_deref().ok_or_else(|| {
+            Error::InvalidArgument(
+                "external power reset is disabled; set --uart-reset-device to enable".into(),
+            )
+        })?;
+        if !device.starts_with("/dev/") {
+            return Err(Error::InvalidArgument(format!(
+                "refusing non-/dev device path: {device}"
+            )));
+        }
+
+        let cookie = self.auth_cookie_header().await?;
+        let scheme = if self.config.use_https { "wss" } else { "ws" };
+        let term_url = format!("{scheme}://{}/api/vm/terminal", self.config.host);
+        let mut ws = crate::ws::connect(&term_url, Some(&cookie)).await?;
+
+        // TIOCSBRK = 0x5427, TIOCCBRK = 0x5428. Python prints the sentinel
+        // only after a successful TIOCCBRK; a thrown exception or kill stops
+        // us from seeing it and we time out instead of reporting fake success.
+        //
+        // The sentinel is concatenated inside Python (`"NKVMOK" + "_8f3c"`)
+        // so the source text — which the PTY echoes back as input — does not
+        // contain the assembled string. Only Python's runtime output does.
+        // That keeps us from being fooled by PTY input echo / line-wrap.
+        let secs = duration_ms as f64 / 1000.0;
+        const SENTINEL_LEFT: &str = "NKVMOK";
+        const SENTINEL_RIGHT: &str = "_8f3c";
+        let sentinel = format!("{SENTINEL_LEFT}{SENTINEL_RIGHT}");
+        let cmd = format!(
+            "python3 -c 'import fcntl,os,time; fd=os.open(\"{device}\", os.O_RDWR|os.O_NOCTTY); fcntl.ioctl(fd, 0x5427); time.sleep({secs}); fcntl.ioctl(fd, 0x5428); os.close(fd); print(\"{SENTINEL_LEFT}\" + \"{SENTINEL_RIGHT}\")'; exit\n"
+        );
+        ws.send(Message::Text(cmd.into()))
+            .await
+            .map_err(|e| Error::Ws(e.to_string()))?;
+
+        // Wait for the sentinel echo. Allow generous slack: shell echo,
+        // python startup on a slow SG2002, the configured break duration,
+        // and the cleanup.
+        let deadline = Duration::from_millis(duration_ms + 8000);
+        let result = tokio::time::timeout(deadline, async {
+            let mut buf = Vec::new();
+            while let Some(msg) = ws.next().await {
+                let m = msg.map_err(|e| Error::Ws(e.to_string()))?;
+                match m {
+                    Message::Binary(b) => buf.extend_from_slice(&b),
+                    Message::Text(t) => buf.extend_from_slice(t.as_bytes()),
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+                // The assembled sentinel only appears in Python's runtime
+                // output, never in the source. A single match means success.
+                if buf
+                    .windows(sentinel.len())
+                    .any(|w| w == sentinel.as_bytes())
+                {
+                    return Ok(());
+                }
+            }
+            Err(Error::Ws(
+                "terminal closed before UART break completed".into(),
+            ))
+        })
+        .await;
+
+        let _ = ws.close(None).await;
+
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(Error::Ws("external power reset timed out".into())),
+        }
     }
 
     // -------------------------------------------------------------------------

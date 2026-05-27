@@ -62,6 +62,18 @@ impl NanoKvmServer {
     }
 
     #[tool(
+        description = "Pulse the NanoKVM's UART TX line low for `duration_ms` (default 5000), then release. For hosts wired to an external power relay (not the ATX header): the break drops the relay, killing host power; releasing the break restores it. Requires --uart-reset-device to be configured by the operator; returns an error otherwise."
+    )]
+    async fn nanokvm_external_power_reset(
+        &self,
+        Parameters(args): Parameters<ExternalPowerResetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let ms = args.duration_ms.unwrap_or(5000);
+        self.client.external_power_reset(ms).await.map_err(to_mcp)?;
+        Ok(text_ok(format!("external power reset complete ({ms}ms break)")))
+    }
+
+    #[tool(
         description = "Force off, wait, then power on. Use this to \"reset\" boards with no hardware reset line. off_duration_ms defaults to 3000."
     )]
     async fn nanokvm_power_cycle(
@@ -405,6 +417,13 @@ pub struct PowerCycleArgs {
     /// Milliseconds to wait between the force-off and power-on (default 3000).
     #[serde(default)]
     pub off_duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct ExternalPowerResetArgs {
+    /// Milliseconds to hold the UART break asserted (default 5000).
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]

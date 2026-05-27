@@ -60,6 +60,12 @@ struct Cli {
     /// is rejected. If unset, the upload tool is disabled.
     #[arg(long, env = "NANOKVM_ISO_DIR")]
     iso_dir: Option<std::path::PathBuf>,
+
+    /// NanoKVM-side TTY device whose TX line drives an external power relay.
+    /// Enables nanokvm_external_power_reset. Must be under /dev/. If unset,
+    /// the tool is disabled.
+    #[arg(long, env = "NANOKVM_UART_RESET_DEVICE")]
+    uart_reset_device: Option<String>,
 }
 
 #[tokio::main]
@@ -85,6 +91,7 @@ async fn main() -> Result<()> {
         use_https: cli.https,
         verify_ssl: cli.verify_ssl,
         iso_dir: cli.iso_dir,
+        uart_reset_device: cli.uart_reset_device,
     })
     .context("failed to build NanoKVM client")?;
 

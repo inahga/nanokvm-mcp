@@ -10,7 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::{Method, header};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::debug;
 
@@ -42,8 +42,9 @@ pub struct NanoKvmClient {
     http: reqwest::Client,
     base_url: String,
     ws_url: String,
-    /// Filled by [`Self::login`] on first authenticated request.
-    token: OnceCell<String>,
+    /// The session JWT. Refreshable (was a `OnceCell`): a 401 drops it so the
+    /// next request re-logs-in, since the NanoKVM token expires over time.
+    token: Mutex<Option<String>>,
     /// HID WebSocket, opened lazily on first WS HID call and reopened on send
     /// failure.
     ws: Mutex<Option<crate::ws::WsStream>>,
@@ -73,7 +74,7 @@ impl NanoKvmClient {
             http,
             base_url,
             ws_url,
-            token: OnceCell::new(),
+            token: Mutex::new(None),
             ws: Mutex::new(None),
         }))
     }
@@ -82,11 +83,53 @@ impl NanoKvmClient {
     // Authentication
     // -------------------------------------------------------------------------
 
-    async fn ensure_authenticated(&self) -> Result<&str> {
-        self.token
-            .get_or_try_init(|| async { self.login().await })
-            .await
-            .map(String::as_str)
+    async fn ensure_authenticated(&self) -> Result<String> {
+        let mut guard = self.token.lock().await;
+        if let Some(t) = guard.as_ref() {
+            return Ok(t.clone());
+        }
+        let t = self.login().await?;
+        *guard = Some(t.clone());
+        Ok(t)
+    }
+
+    /// Drop the cached token after a 401 so the next request re-authenticates.
+    /// The NanoKVM JWT expires; without this it is cached for the life of the
+    /// process and every call after expiry fails Unauthorized.
+    async fn invalidate_token(&self) {
+        *self.token.lock().await = None;
+    }
+
+    /// Attach the auth cookie and send a REST request. On 401 (expired JWT)
+    /// drop the token, re-login, and retry once — but only if the body is
+    /// cloneable (streaming/multipart bodies like the ISO upload can't be
+    /// retried; they surface the 401 and the next fresh call re-auths).
+    async fn send_authed(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        let retry = req.try_clone();
+        let cookie = self.auth_cookie_header().await?;
+        let resp = req.header(header::COOKIE, cookie).send().await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if let Some(retry) = retry {
+                self.invalidate_token().await;
+                let cookie = self.auth_cookie_header().await?;
+                return Ok(retry.header(header::COOKIE, cookie).send().await?);
+            }
+        }
+        Ok(resp)
+    }
+
+    /// Open a WS to `ws_url` with the auth cookie. On a 401 handshake (expired
+    /// JWT) drop the token, re-login, and retry once.
+    async fn connect_ws(&self, ws_url: &str) -> Result<crate::ws::WsStream> {
+        let cookie = self.auth_cookie_header().await?;
+        match crate::ws::connect(ws_url, Some(&cookie)).await {
+            Err(Error::Ws(msg)) if msg.contains("401") => {
+                self.invalidate_token().await;
+                let cookie = self.auth_cookie_header().await?;
+                crate::ws::connect(ws_url, Some(&cookie)).await
+            }
+            other => other,
+        }
     }
 
     /// Return a `Cookie: nano-kvm-token=<jwt>` header value, authenticating
@@ -158,12 +201,7 @@ impl NanoKvmClient {
     where
         T: for<'de> Deserialize<'de> + Default,
     {
-        let cookie = self.auth_cookie_header().await?;
-        let resp = req
-            .header(header::COOKIE, cookie)
-            .send()
-            .await?
-            .error_for_status()?;
+        let resp = self.send_authed(req).await?.error_for_status()?;
         let env: ApiEnvelope<T> = resp.json().await?;
         if env.code != 0 {
             return Err(Error::Api {
@@ -250,10 +288,9 @@ impl NanoKvmClient {
             )));
         }
 
-        let cookie = self.auth_cookie_header().await?;
         let scheme = if self.config.use_https { "wss" } else { "ws" };
         let term_url = format!("{scheme}://{}/api/vm/terminal", self.config.host);
-        let mut ws = crate::ws::connect(&term_url, Some(&cookie)).await?;
+        let mut ws = self.connect_ws(&term_url).await?;
 
         // TIOCSBRK = 0x5427, TIOCCBRK = 0x5428. Python prints the sentinel
         // only after a successful TIOCCBRK; a thrown exception or kill stops
@@ -555,12 +592,11 @@ impl NanoKvmClient {
     /// Send a binary WS frame, opening the connection lazily and reopening it
     /// once on send failure.
     async fn ws_send_binary(&self, payload: Vec<u8>) -> Result<()> {
-        let cookie = self.auth_cookie_header().await?;
         let mut guard = self.ws.lock().await;
 
         for attempt in 0..2 {
             if guard.is_none() {
-                *guard = Some(crate::ws::connect(&self.ws_url, Some(&cookie)).await?);
+                *guard = Some(self.connect_ws(&self.ws_url).await?);
             }
             let ws = guard.as_mut().expect("connected on this iteration");
             match ws.send(Message::Binary(payload.clone().into())).await {
@@ -708,13 +744,9 @@ impl NanoKvmClient {
     }
 
     async fn screenshot_inner(&self) -> Result<Vec<u8>> {
-        let cookie = self.auth_cookie_header().await?;
         let url = format!("{}/api/stream/mjpeg?n=1", self.base_url);
         let resp = self
-            .http
-            .get(&url)
-            .header(header::COOKIE, cookie)
-            .send()
+            .send_authed(self.http.get(&url))
             .await?
             .error_for_status()?;
 

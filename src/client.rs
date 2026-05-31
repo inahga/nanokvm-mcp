@@ -60,6 +60,12 @@ impl NanoKvmClient {
             .danger_accept_invalid_certs(!config.verify_ssl)
             .timeout(std::time::Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::limited(10))
+            // Don't keep idle keep-alive connections around. The NanoKVM
+            // closes the socket after responding, so a pooled connection
+            // reused for a later request (notably a multi-GB upload POST
+            // following the login) streams into a half-closed socket and is
+            // reset mid-body. A fresh connection per request avoids it.
+            .pool_max_idle_per_host(0)
             .build()?;
 
         Ok(Arc::new(Self {
@@ -509,6 +515,13 @@ impl NanoKvmClient {
         let req = self
             .http
             .post(format!("{}/api/download/file", self.base_url))
+            // The client-wide 30s timeout (see `new`) suits the small
+            // JSON/HID calls, but writing a multi-GB ISO to the NanoKVM's
+            // SD card takes minutes — the global deadline aborts the POST
+            // mid-stream and leaves a truncated file on `/data`. A
+            // per-request timeout supersedes the client default, so give
+            // the upload a generous ceiling instead.
+            .timeout(std::time::Duration::from_secs(3600))
             .multipart(form);
         self.send_envelope(req).await
     }

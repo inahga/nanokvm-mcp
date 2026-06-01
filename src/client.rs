@@ -121,12 +121,13 @@ impl NanoKvmClient {
     /// Open a WS to `ws_url` with the auth cookie. On a 401 handshake (expired
     /// JWT) drop the token, re-login, and retry once.
     async fn connect_ws(&self, ws_url: &str) -> Result<crate::ws::WsStream> {
+        let verify_ssl = self.config.verify_ssl;
         let cookie = self.auth_cookie_header().await?;
-        match crate::ws::connect(ws_url, Some(&cookie)).await {
+        match crate::ws::connect(ws_url, Some(&cookie), verify_ssl).await {
             Err(Error::Ws(msg)) if msg.contains("401") => {
                 self.invalidate_token().await;
                 let cookie = self.auth_cookie_header().await?;
-                crate::ws::connect(ws_url, Some(&cookie)).await
+                crate::ws::connect(ws_url, Some(&cookie), verify_ssl).await
             }
             other => other,
         }
